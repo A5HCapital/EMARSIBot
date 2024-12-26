@@ -18,53 +18,56 @@ def calculate_indicators(data, ema_short_period, ema_long_period):
 
 # Backtest Function
 def backtest(data, initial_balance, rsi_threshold):
-    """
-    Backtest EMA crossover strategy with volume and RSI confirmation.
-    """
-    balance = initial_balance  # Initialize starting cash balance
-    position = 0  # Initialize position as scalar (number of shares held)
+    balance = initial_balance
+    position = 0
     data['Portfolio Value'] = initial_balance
-    data['Signal'] = 0  # Initialize signal column
+    data['Signal'] = 0
+    trades = []
 
     for i in range(1, len(data)):
-        # Debugging: Check input types
-        print(f"Index {i}: balance={balance}, type(balance)={type(balance)}")
-        print(f"Index {i}: Close.iloc[i]={data['Close'].iloc[i]}, type(Close.iloc[i])={type(data['Close'].iloc[i])}")
-
-        # Validate `position`
-        if not isinstance(position, (int, float)):
-            raise TypeError(f"`position` must be scalar. Found type: {type(position)}")
-
-        # Buy condition: Check if we meet the criteria to buy
+        # Buy condition
         if (
             data['EMA_Short'].iloc[i] > data['EMA_Long'].iloc[i] and
             data['EMA_Short'].iloc[i - 1] <= data['EMA_Long'].iloc[i - 1] and
             data['Volume_Change'].iloc[i] > 0 and
             data['RSI'].iloc[i] > rsi_threshold and
-            position == 0  # Ensures no position is currently held
+            position == 0  # Ensures no position is currently held (scalar check)
         ):
-            # Calculate position as scalar
-            position = balance / float(data['Close'].iloc[i])  # Explicitly cast to float
-            balance = 0  # Reset balance
-            data.loc[data.index[i], 'Signal'] = 1  # Mark buy signal
+            entry_date = data.index[i]
+            entry_price = float(data['Close'].iloc[i])  # Ensure scalar value
+            position = balance / entry_price
+            balance = 0
+            data.loc[data.index[i], 'Signal'] = 1
+            trades.append({"Type": "Buy", "Date": entry_date, "Price": entry_price})
 
-        # Sell condition: Check if we meet the criteria to sell
+        # Sell condition
         elif (
             data['EMA_Short'].iloc[i] < data['EMA_Long'].iloc[i] and
             data['EMA_Short'].iloc[i - 1] >= data['EMA_Long'].iloc[i - 1] and
             data['Volume_Change'].iloc[i] > 0 and
             data['RSI'].iloc[i] < rsi_threshold and
-            position > 0  # Ensures a position is held
+            position > 0  # Ensures a position is held (scalar check)
         ):
-            # Calculate balance as scalar
-            balance = position * float(data['Close'].iloc[i])  # Explicitly cast to float
-            position = 0  # Reset position to zero
-            data.loc[data.index[i], 'Signal'] = -1  # Mark sell signal
+            exit_date = data.index[i]
+            exit_price = float(data['Close'].iloc[i])  # Ensure scalar value
+            balance = position * exit_price
+            trades[-1].update({"Exit Date": exit_date, "Exit Price": exit_price})
+            trades[-1].update({"P/L": balance - initial_balance, "P/L %": (balance - initial_balance) / initial_balance * 100})
+            position = 0
+            data.loc[data.index[i], 'Signal'] = -1
 
-        # Update portfolio value as scalar
-        data.loc[data.index[i], 'Portfolio Value'] = balance + (position * float(data['Close'].iloc[i]))
+        # Update portfolio value
+        data.loc[data.index[i], 'Portfolio Value'] = balance + (position * float(data['Close'].iloc[i]))  # Ensure scalar calculation
 
-    return data
+    data['Peak'] = data['Portfolio Value'].cummax()
+    data['Drawdown'] = data['Portfolio Value'] - data['Peak']
+    data['Drawdown %'] = (data['Drawdown'] / data['Peak']) * 100
+    max_drawdown = data['Drawdown %'].min()
+
+    for trade in trades:
+        trade["Max Drawdown %"] = max_drawdown
+
+    return data, trades
 
 
 # Streamlit UI
@@ -87,10 +90,11 @@ if st.button("Run Backtest"):
         data = calculate_indicators(data, ema_short_period, ema_long_period)
         
         st.write("Running backtest...")
-        results = backtest(data, initial_balance, rsi_threshold)
+        results, trades = backtest(data, initial_balance, rsi_threshold)
         
         st.write("Backtest Complete!")
         st.write(f"**Final Portfolio Value:** ${results['Portfolio Value'].iloc[-1]:,.2f}")
+        st.write(f"**Max Drawdown:** {results['Drawdown %'].min():.2f}%")
         
         st.write("Equity Curve:")
         fig, ax = plt.subplots(figsize=(12, 6))
@@ -99,7 +103,13 @@ if st.button("Run Backtest"):
         ax.legend()
         st.pyplot(fig)
 
-        csv = results.to_csv(index=True)
-        st.download_button(label="Download CSV", data=csv, file_name=f"{ticker}_backtest_results.csv", mime="text/csv")
+        # Export trades to CSV
+        trades_df = pd.DataFrame(trades)
+        csv = trades_df.to_csv(index=False)
+        st.download_button(label="Download Trades CSV", data=csv, file_name=f"{ticker}_trade_details.csv", mime="text/csv")
+        
+        # Export results with portfolio value
+        csv_results = results.to_csv(index=True)
+        st.download_button(label="Download Full Results CSV", data=csv_results, file_name=f"{ticker}_backtest_results.csv", mime="text/csv")
     else:
         st.error("No data found for the given ticker and date range.")
