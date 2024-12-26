@@ -24,6 +24,9 @@ def backtest(data, initial_balance, rsi_threshold):
     data['Signal'] = 0
     trades = []
 
+    # Dynamically identify the ticker (second level of the MultiIndex for price columns)
+    ticker = data.columns.get_level_values(1).unique()[0]
+
     for i in range(1, len(data)):
         # Buy condition
         if (
@@ -31,14 +34,14 @@ def backtest(data, initial_balance, rsi_threshold):
             data['EMA_Short'].iloc[i - 1] <= data['EMA_Long'].iloc[i - 1] and
             data['Volume_Change'].iloc[i] > 0 and
             data['RSI'].iloc[i] > rsi_threshold and
-            position == 0  # Ensures no position is currently held (scalar check)
+            position == 0
         ):
             entry_date = data.index[i]
-            entry_price = float(data['Close'].iloc[i])  # Ensure scalar value
+            entry_price = float(data[('Close', ticker)].iloc[i])  # Dynamically access 'Close' price
             position = balance / entry_price
             balance = 0
             data.loc[data.index[i], 'Signal'] = 1
-            trades.append({"Type": "Buy", "Date": entry_date, "Price": entry_price})
+            trades.append({"Type": "Buy", "Entry Date": entry_date, "Entry Price": entry_price})
 
         # Sell condition
         elif (
@@ -46,18 +49,22 @@ def backtest(data, initial_balance, rsi_threshold):
             data['EMA_Short'].iloc[i - 1] >= data['EMA_Long'].iloc[i - 1] and
             data['Volume_Change'].iloc[i] > 0 and
             data['RSI'].iloc[i] < rsi_threshold and
-            position > 0  # Ensures a position is held (scalar check)
+            position > 0
         ):
             exit_date = data.index[i]
-            exit_price = float(data['Close'].iloc[i])  # Ensure scalar value
+            exit_price = float(data[('Close', ticker)].iloc[i])  # Dynamically access 'Close' price
             balance = position * exit_price
-            trades[-1].update({"Exit Date": exit_date, "Exit Price": exit_price})
-            trades[-1].update({"P/L": balance - initial_balance, "P/L %": (balance - initial_balance) / initial_balance * 100})
+            trades[-1].update({
+                "Exit Date": exit_date,
+                "Exit Price": exit_price,
+                "P/L": balance - initial_balance,
+                "P/L %": (balance - initial_balance) / initial_balance * 100
+            })
             position = 0
             data.loc[data.index[i], 'Signal'] = -1
 
         # Update portfolio value
-        data.loc[data.index[i], 'Portfolio Value'] = balance + (position * float(data['Close'].iloc[i]))  # Ensure scalar calculation
+        data.loc[data.index[i], 'Portfolio Value'] = balance + (position * float(data[('Close', ticker)].iloc[i]))
 
     data['Peak'] = data['Portfolio Value'].cummax()
     data['Drawdown'] = data['Portfolio Value'] - data['Peak']
@@ -67,7 +74,24 @@ def backtest(data, initial_balance, rsi_threshold):
     for trade in trades:
         trade["Max Drawdown %"] = max_drawdown
 
-    return data, trades
+    # Create trades DataFrame
+    trade_df = pd.DataFrame(trades)
+
+    # Flatten the MultiIndex in `data`
+    data.columns = ['_'.join(filter(None, col)) if isinstance(col, tuple) else col for col in data.columns]
+    data = data.reset_index()  # Reset the index, making 'Date' a column
+    data.rename(columns={'index': 'Date'}, inplace=True)  # Rename the index column to 'Date'
+
+    # Perform the merge
+    combined = pd.merge(data, trade_df, how='left', left_on='Date', right_on='Entry Date')
+
+    return combined
+
+
+
+
+
+
 
 
 # Streamlit UI
@@ -90,26 +114,28 @@ if st.button("Run Backtest"):
         data = calculate_indicators(data, ema_short_period, ema_long_period)
         
         st.write("Running backtest...")
-        results, trades = backtest(data, initial_balance, rsi_threshold)
+        results = backtest(data, initial_balance, rsi_threshold)
         
         st.write("Backtest Complete!")
         st.write(f"**Final Portfolio Value:** ${results['Portfolio Value'].iloc[-1]:,.2f}")
         st.write(f"**Max Drawdown:** {results['Drawdown %'].min():.2f}%")
         
+        # Dynamically get the flattened column name for `Close`
+        close_col = [col for col in results.columns if col.startswith("Close")][0]
+
         st.write("Equity Curve:")
         fig, ax = plt.subplots(figsize=(12, 6))
-        ax.plot(results.index, results['Portfolio Value'], label="Portfolio Value")
-        ax.plot(results.index, results['Close'], label="Stock Price", alpha=0.5)
+        ax.plot(results['Date'], results['Portfolio Value'], label="Portfolio Value")
+        ax.plot(results['Date'], results[close_col], label="Stock Price", alpha=0.5)
         ax.legend()
         st.pyplot(fig)
 
-        # Export trades to CSV
-        trades_df = pd.DataFrame(trades)
-        csv = trades_df.to_csv(index=False)
-        st.download_button(label="Download Trades CSV", data=csv, file_name=f"{ticker}_trade_details.csv", mime="text/csv")
-        
-        # Export results with portfolio value
-        csv_results = results.to_csv(index=True)
-        st.download_button(label="Download Full Results CSV", data=csv_results, file_name=f"{ticker}_backtest_results.csv", mime="text/csv")
+        # Export combined results to CSV
+        csv = results.to_csv(index=False)
+        st.download_button(label="Download Combined Results CSV", data=csv, file_name=f"{ticker}_backtest_combined_results.csv", mime="text/csv")
     else:
         st.error("No data found for the given ticker and date range.")
+
+
+
+
